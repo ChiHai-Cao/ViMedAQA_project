@@ -40,7 +40,7 @@ class VietnameseDataset:
             
             questions = df_questions["question"].tolist()
             true_keys = df_questions["article_url"].tolist()
-            documents = df_documents["content"].tolist()
+            documents = df_documents["document_text"].tolist()
             document_urls = df_documents["article_url"].tolist()
             
             key2docidx = {url: idx for idx, url in enumerate(document_urls)}
@@ -442,4 +442,5 @@ def main():
     )
     
     print(f"\n✅ Evaluation completed successfully!")
+
     return results
