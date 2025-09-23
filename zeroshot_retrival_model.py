@@ -36,7 +36,7 @@ class VietnameseDataset:
             
             # Validate required columns
             self._validate_dataframe(df_questions, ["question", "article_url"], "questions")
-            self._validate_dataframe(df_documents, ["content", "article_url"], "documents")
+            self._validate_dataframe(df_documents, ["document_text", "article_url"], "documents")
             
             questions = df_questions["question"].tolist()
             true_keys = df_questions["article_url"].tolist()
