@@ -36,12 +36,12 @@ class VietnameseDataset:
             
             # Validate required columns
             self._validate_dataframe(df_questions, ["question", "article_url"], "questions")
-            self._validate_dataframe(df_documents, ["content", "url"], "documents")
+            self._validate_dataframe(df_documents, ["content", "article_url"], "documents")
             
             questions = df_questions["question"].tolist()
             true_keys = df_questions["article_url"].tolist()
             documents = df_documents["content"].tolist()
-            document_urls = df_documents["url"].tolist()
+            document_urls = df_documents["article_url"].tolist()
             
             key2docidx = {url: idx for idx, url in enumerate(document_urls)}
             
@@ -418,3 +418,28 @@ class EmbeddingEvaluator:
                 status = "✓" if doc['is_relevant'] else "✗"
                 print(f"    {doc['rank']}. [{status}] Score: {doc['similarity_score']:.4f}")
                 print(f"       URL: {doc['document_url']}")
+
+
+def main():
+    """Main function to run the evaluation."""
+    # Configuration
+    train_path = "/kaggle/input/vimedaqa-dataset/dataset/train.json"
+    articles_path = "/kaggle/input/vimedaqa-dataset/dataset/articles_add_info.json"
+    output_file = "vietnamese_embedding_evaluation_results.json"
+    
+    # Initialize and run evaluator
+    evaluator = EmbeddingEvaluator(
+        train_path=train_path,
+        articles_path=articles_path,
+        model_name="dangvantuan/vietnamese-document-embedding",
+        max_seq_length=8192
+    )
+    
+    results = evaluator.run_evaluation(
+        batch_size=16,
+        k_values=[1, 3, 5, 10],
+        output_file=output_file
+    )
+    
+    print(f"\n✅ Evaluation completed successfully!")
+    return results
