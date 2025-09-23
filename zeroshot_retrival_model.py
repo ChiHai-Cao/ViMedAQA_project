@@ -4,6 +4,7 @@ import faiss
 from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 import json
+import csv
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Union
@@ -177,6 +178,133 @@ class FaissIndex:
         return self.index.search(query_embeddings.astype(np.float32), k)
 
 
+class CSVLogger:
+    """Class for logging evaluation data to CSV files."""
+    
+    def __init__(self, base_filename: str):
+        self.base_filename = base_filename
+        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Define CSV file paths
+        self.metrics_csv = f"{base_filename}_metrics_{self.timestamp}.csv"
+        self.detailed_csv = f"{base_filename}_detailed_{self.timestamp}.csv"
+        self.search_logs_csv = f"{base_filename}_search_logs_{self.timestamp}.csv"
+        
+        # Initialize CSV files with headers
+        self._initialize_csv_files()
+    
+    def _initialize_csv_files(self) -> None:
+        """Initialize CSV files with appropriate headers."""
+        # Metrics CSV
+        with open(self.metrics_csv, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'timestamp', 'model_name', 'max_seq_length', 'num_questions', 
+                'num_documents', 'valid_samples', 'total_samples', 'MRR',
+                'Recall@1', 'Recall@3', 'Recall@5', 'Recall@10'
+            ])
+        
+        # Detailed results CSV
+        with open(self.detailed_csv, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'sample_id', 'question', 'true_document_url', 'true_document_index',
+                'rank_of_true_doc', 'found_in_top_10', 'top_1_score', 'top_1_url',
+                'top_2_score', 'top_2_url', 'top_3_score', 'top_3_url'
+            ])
+        
+        # Search logs CSV
+        with open(self.search_logs_csv, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'sample_id', 'question_length', 'search_timestamp', 'retrieved_rank',
+                'document_index', 'similarity_score', 'document_url', 'is_relevant'
+            ])
+    
+    def log_metrics(self, model_name: str, max_seq_length: int, 
+                   dataset_stats: Dict, metrics: Dict) -> None:
+        """Log overall metrics to CSV."""
+        with open(self.metrics_csv, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                datetime.now().isoformat(),
+                model_name,
+                max_seq_length,
+                dataset_stats.get('num_questions', 0),
+                dataset_stats.get('num_documents', 0),
+                metrics.get('Valid_Samples', 0),
+                metrics.get('Total_Samples', 0),
+                metrics.get('MRR', 0),
+                metrics.get('Recall@1', 0),
+                metrics.get('Recall@3', 0),
+                metrics.get('Recall@5', 0),
+                metrics.get('Recall@10', 0)
+            ])
+    
+    def log_detailed_results(self, sample_results: List[Dict]) -> None:
+        """Log detailed results for each sample to CSV."""
+        with open(self.detailed_csv, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            
+            for sample in sample_results:
+                # Find rank of true document
+                rank_of_true = None
+                for doc in sample['top_10_relevant_documents']:
+                    if doc['is_relevant']:
+                        rank_of_true = doc['rank']
+                        break
+                
+                # Get top 3 documents info
+                top_docs = sample['top_10_relevant_documents'][:3]
+                
+                row = [
+                    sample['sample_id'],
+                    sample['question'][:200],  # Truncate long questions
+                    sample['true_document_url'],
+                    sample['true_document_index'],
+                    rank_of_true if rank_of_true else 'Not found',
+                    rank_of_true is not None and rank_of_true <= 10,
+                ]
+                
+                # Add top 3 document info
+                for i in range(3):
+                    if i < len(top_docs):
+                        row.extend([top_docs[i]['similarity_score'], top_docs[i]['document_url']])
+                    else:
+                        row.extend(['', ''])
+                
+                writer.writerow(row)
+    
+    def log_search_results(self, sample_id: int, question: str, 
+                          retrieved_docs: List[Dict]) -> None:
+        """Log individual search results to CSV."""
+        with open(self.search_logs_csv, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            
+            search_timestamp = datetime.now().isoformat()
+            question_length = len(question.split())
+            
+            for doc in retrieved_docs:
+                writer.writerow([
+                    sample_id,
+                    question_length,
+                    search_timestamp,
+                    doc['rank'],
+                    doc['document_index'],
+                    doc['similarity_score'],
+                    doc['document_url'],
+                    doc['is_relevant']
+                ])
+    
+    def get_csv_paths(self) -> Dict[str, str]:
+        """Return paths to all CSV files."""
+        return {
+            'metrics': self.metrics_csv,
+            'detailed': self.detailed_csv,
+            'search_logs': self.search_logs_csv
+        }
+
+
 class EvaluationMetrics:
     """Class for calculating retrieval metrics."""
     
@@ -187,7 +315,8 @@ class EvaluationMetrics:
                          true_keys: List[str],
                          document_urls: List[str],
                          key2docidx: Dict[str, int],
-                         k_values: List[int] = [1, 3, 5, 10]) -> Tuple[Dict[str, float], List[Dict]]:
+                         k_values: List[int] = [1, 3, 5, 10],
+                         csv_logger: Optional[CSVLogger] = None) -> Tuple[Dict[str, float], List[Dict]]:
         """
         Calculate retrieval metrics.
         
@@ -236,6 +365,10 @@ class EvaluationMetrics:
                     "is_relevant": doc_idx == true_doc_idx
                 })
             
+            # Log search results to CSV if logger provided
+            if csv_logger:
+                csv_logger.log_search_results(j, question, top_10_docs)
+            
             # Calculate recall metrics
             for k in k_values:
                 if true_doc_idx in question_indices[:k]:
@@ -279,11 +412,14 @@ class EmbeddingEvaluator:
         self.index: Optional[FaissIndex] = None
         self.doc_embeddings: Optional[np.ndarray] = None
         self.q_embeddings: Optional[np.ndarray] = None
+        self.csv_logger: Optional[CSVLogger] = None
     
     def run_evaluation(self, 
                       batch_size: int = 16,
                       k_values: List[int] = [1, 3, 5, 10],
-                      output_file: str = "vietnamese_embedding_evaluation_results.json") -> Dict[str, Union[Dict, List]]:
+                      output_file: str = "vietnamese_embedding_evaluation_results.json",
+                      enable_csv_logging: bool = True,
+                      csv_base_filename: str = "vietnamese_embedding_eval") -> Dict[str, Union[Dict, List]]:
         """
         Run the complete evaluation pipeline.
         
@@ -291,12 +427,19 @@ class EmbeddingEvaluator:
             batch_size: Batch size for encoding
             k_values: K values for recall calculation
             output_file: Output file path for results
+            enable_csv_logging: Whether to enable CSV logging
+            csv_base_filename: Base filename for CSV logs
             
         Returns:
             Dictionary containing metrics and sample results
         """
         print("Starting evaluation...")
         print(f"Dataset stats: {self.dataset.get_stats()}")
+        
+        # Initialize CSV logger if enabled
+        if enable_csv_logging:
+            self.csv_logger = CSVLogger(csv_base_filename)
+            print(f"CSV logging enabled. Files will be saved with timestamp.")
         
         # Load model
         print("\n1. Loading model...")
@@ -329,11 +472,23 @@ class EmbeddingEvaluator:
             self.dataset.true_keys,
             self.dataset.document_urls,
             self.dataset.key2docidx,
-            k_values
+            k_values,
+            self.csv_logger
         )
         
-        # Save results
-        print("\n6. Saving results...")
+        # Log to CSV files
+        if self.csv_logger:
+            print("\n6. Saving CSV logs...")
+            self.csv_logger.log_metrics(
+                self.model.model_name, 
+                self.model.max_seq_length, 
+                self.dataset.get_stats(), 
+                metrics
+            )
+            self.csv_logger.log_detailed_results(sample_results)
+        
+        # Save JSON results
+        print(f"\n{'7' if self.csv_logger else '6'}. Saving JSON results...")
         output_path = self._save_results(
             self.model.model_name,
             metrics,
@@ -342,12 +497,14 @@ class EmbeddingEvaluator:
         )
         
         # Display results
-        self._display_results(self.model.model_name, metrics, sample_results, output_path)
+        csv_paths = self.csv_logger.get_csv_paths() if self.csv_logger else {}
+        self._display_results(self.model.model_name, metrics, sample_results, output_path, csv_paths)
         
         return {
             "metrics": metrics,
             "sample_results": sample_results,
-            "output_file": output_path
+            "output_file": output_path,
+            "csv_files": csv_paths
         }
     
     def _save_results(self, 
@@ -387,7 +544,8 @@ class EmbeddingEvaluator:
                         model_name: str,
                         metrics: Dict[str, float],
                         sample_results: List[Dict],
-                        output_file: str) -> None:
+                        output_file: str,
+                        csv_files: Dict[str, str] = {}) -> None:
         """Display evaluation results."""
         print("\n" + "="*60)
         print("EVALUATION RESULTS")
@@ -402,7 +560,13 @@ class EmbeddingEvaluator:
             if f"Recall@{k}" in metrics:
                 print(f"  Recall@{k}: {metrics[f'Recall@{k}']:.4f}")
         
-        print(f"\nDetailed results saved to: {output_file}")
+        print(f"\nJSON results saved to: {output_file}")
+        
+        if csv_files:
+            print("\nCSV files saved:")
+            print(f"  Metrics: {csv_files['metrics']}")
+            print(f"  Detailed results: {csv_files['detailed']}")
+            print(f"  Search logs: {csv_files['search_logs']}")
         
         print("\n" + "="*60)
         print("EXAMPLE RESULTS (First 3 samples)")
@@ -418,29 +582,3 @@ class EmbeddingEvaluator:
                 status = "✓" if doc['is_relevant'] else "✗"
                 print(f"    {doc['rank']}. [{status}] Score: {doc['similarity_score']:.4f}")
                 print(f"       URL: {doc['document_url']}")
-
-
-def main():
-    """Main function to run the evaluation."""
-    # Configuration
-    train_path = "/kaggle/input/vimedaqa-dataset/dataset/train.json"
-    articles_path = "/kaggle/input/vimedaqa-dataset/dataset/articles_add_info.json"
-    output_file = "vietnamese_embedding_evaluation_results.json"
-    
-    # Initialize and run evaluator
-    evaluator = EmbeddingEvaluator(
-        train_path=train_path,
-        articles_path=articles_path,
-        model_name="dangvantuan/vietnamese-document-embedding",
-        max_seq_length=8192
-    )
-    
-    results = evaluator.run_evaluation(
-        batch_size=16,
-        k_values=[1, 3, 5, 10],
-        output_file=output_file
-    )
-    
-    print(f"\n✅ Evaluation completed successfully!")
-
-    return results
