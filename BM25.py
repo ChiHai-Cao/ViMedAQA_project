@@ -7,13 +7,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Union
 import logging
-from abc import ABC, abstractmethod
-import math
-from collections import Counter, defaultdict
+from collections import Counter
 import re
-from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import pickle
+import math
 
 
 class VietnameseDataset:
@@ -74,316 +70,172 @@ class VietnameseDataset:
         }
 
 
-class TextPreprocessor:
-    """Text preprocessing utilities for Vietnamese text."""
+class VietnameseTextProcessor:
+    """Vietnamese text preprocessing for BM25."""
     
-    @staticmethod
-    def preprocess_text(text: str, lowercase: bool = True, remove_punctuation: bool = True) -> str:
-        """Basic text preprocessing."""
+    def __init__(self):
+        # Vietnamese stop words (basic set)
+        self.stop_words = {
+            'là', 'của', 'và', 'có', 'được', 'trong', 'với', 'để', 'cho', 'từ', 'trên',
+            'về', 'tại', 'một', 'các', 'những', 'này', 'đó', 'hay', 'hoặc', 'như', 'sẽ',
+            'đã', 'đang', 'phải', 'nên', 'cần', 'ra', 'vào', 'bị', 'bằng', 'theo', 'sau',
+            'trước', 'giữa', 'dưới', 'lên', 'xuống', 'ngoài', 'cùng', 'nhau', 'thì', 'mà',
+            'nếu', 'khi', 'lúc', 'bao', 'ai', 'gì', 'đâu', 'sao', 'nào', 'làm', 'việc',
+            'người', 'ngày', 'năm', 'thời', 'lại', 'chỉ', 'rất', 'nhiều', 'ít', 'hơn',
+            'nhất', 'cũng', 'còn', 'đều', 'luôn', 'vẫn', 'đã', 'sẽ', 'không', 'chưa',
+            'bây', 'giờ', 'hiện', 'nay'
+        }
+    
+    def preprocess_text(self, text: str) -> List[str]:
+        """
+        Preprocess Vietnamese text for BM25.
+        
+        Args:
+            text: Input text
+            
+        Returns:
+            List of preprocessed tokens
+        """
         if not isinstance(text, str):
-            return ""
-        
-        # Remove extra whitespace
-        text = re.sub(r'\s+', ' ', text).strip()
-        
-        if lowercase:
-            text = text.lower()
-        
-        if remove_punctuation:
-            # Remove punctuation but keep Vietnamese characters
-            text = re.sub(r'[^\w\s]', ' ', text)
-            text = re.sub(r'\s+', ' ', text).strip()
-        
-        return text
-    
-    @staticmethod
-    def tokenize(text: str) -> List[str]:
-        """Simple tokenization by splitting on whitespace."""
-        return text.split()
-
-
-class SparseRetrievalModel(ABC):
-    """Abstract base class for sparse retrieval models."""
-    
-    def __init__(self, name: str):
-        self.name = name
-        self.is_fitted = False
-    
-    @abstractmethod
-    def fit(self, documents: List[str]) -> None:
-        """Fit the model on the document collection."""
-        pass
-    
-    @abstractmethod
-    def score(self, query: str, k: int = 10) -> List[Tuple[int, float]]:
-        """Score documents for a query and return top-k results."""
-        pass
-    
-    def get_model_info(self) -> Dict[str, str]:
-        """Get model information."""
-        return {"model_name": self.name}
-
-
-class BM25Model(SparseRetrievalModel):
-    """BM25 retrieval model implementation."""
-    
-    def __init__(self, k1: float = 1.2, b: float = 0.75):
-        super().__init__("BM25")
-        self.k1 = k1
-        self.b = b
-        self.preprocessor = TextPreprocessor()
-        
-        # Model state
-        self.documents = []
-        self.processed_docs = []
-        self.doc_lengths = []
-        self.avgdl = 0.0
-        self.doc_frequencies = Counter()
-        self.idf_scores = {}
-        self.N = 0
-    
-    def fit(self, documents: List[str]) -> None:
-        """Fit BM25 model on document collection."""
-        print(f"Fitting {self.name} model on {len(documents)} documents...")
-        
-        self.documents = documents
-        self.N = len(documents)
-        
-        # Preprocess documents
-        print("Preprocessing documents...")
-        self.processed_docs = []
-        self.doc_lengths = []
-        
-        for doc in tqdm(documents, desc="Processing documents"):
-            processed_doc = self.preprocessor.preprocess_text(doc)
-            tokens = self.preprocessor.tokenize(processed_doc)
-            self.processed_docs.append(tokens)
-            self.doc_lengths.append(len(tokens))
-        
-        # Calculate average document length
-        self.avgdl = sum(self.doc_lengths) / len(self.doc_lengths) if self.doc_lengths else 0
-        
-        # Calculate document frequencies
-        print("Calculating document frequencies...")
-        self.doc_frequencies = Counter()
-        for tokens in tqdm(self.processed_docs, desc="Calculating DF"):
-            unique_tokens = set(tokens)
-            for token in unique_tokens:
-                self.doc_frequencies[token] += 1
-        
-        # Calculate IDF scores
-        print("Calculating IDF scores...")
-        self.idf_scores = {}
-        for term, df in self.doc_frequencies.items():
-            self.idf_scores[term] = math.log((self.N - df + 0.5) / (df + 0.5))
-        
-        self.is_fitted = True
-        print(f"BM25 model fitted. Vocabulary size: {len(self.doc_frequencies)}")
-    
-    def score(self, query: str, k: int = 10) -> List[Tuple[int, float]]:
-        """Score documents using BM25."""
-        if not self.is_fitted:
-            raise ValueError("Model must be fitted before scoring")
-        
-        # Preprocess query
-        processed_query = self.preprocessor.preprocess_text(query)
-        query_tokens = self.preprocessor.tokenize(processed_query)
-        
-        # Calculate BM25 scores for all documents
-        scores = []
-        
-        for doc_idx, (doc_tokens, doc_len) in enumerate(zip(self.processed_docs, self.doc_lengths)):
-            score = 0.0
-            doc_token_counts = Counter(doc_tokens)
-            
-            for term in query_tokens:
-                if term in self.idf_scores:
-                    tf = doc_token_counts.get(term, 0)
-                    idf = self.idf_scores[term]
-                    
-                    # BM25 formula
-                    numerator = tf * (self.k1 + 1)
-                    denominator = tf + self.k1 * (1 - self.b + self.b * (doc_len / self.avgdl))
-                    score += idf * (numerator / denominator)
-            
-            scores.append((doc_idx, score))
-        
-        # Sort by score and return top-k
-        scores.sort(key=lambda x: x[1], reverse=True)
-        return scores[:k]
-    
-    def get_model_info(self) -> Dict[str, Union[str, float]]:
-        """Get BM25 model information."""
-        return {
-            "model_name": self.name,
-            "k1": self.k1,
-            "b": self.b,
-            "vocabulary_size": len(self.doc_frequencies),
-            "avg_doc_length": self.avgdl
-        }
-
-
-class TFIDFModel(SparseRetrievalModel):
-    """TF-IDF retrieval model implementation."""
-    
-    def __init__(self, max_features: Optional[int] = None, ngram_range: Tuple[int, int] = (1, 1)):
-        super().__init__("TF-IDF")
-        self.max_features = max_features
-        self.ngram_range = ngram_range
-        self.preprocessor = TextPreprocessor()
-        
-        # Model components
-        self.vectorizer = None
-        self.doc_vectors = None
-        self.documents = []
-    
-    def fit(self, documents: List[str]) -> None:
-        """Fit TF-IDF model on document collection."""
-        print(f"Fitting {self.name} model on {len(documents)} documents...")
-        
-        self.documents = documents
-        
-        # Preprocess documents
-        print("Preprocessing documents...")
-        processed_docs = []
-        for doc in tqdm(documents, desc="Processing documents"):
-            processed_doc = self.preprocessor.preprocess_text(doc)
-            processed_docs.append(processed_doc)
-        
-        # Create and fit TF-IDF vectorizer
-        print("Creating TF-IDF vectors...")
-        self.vectorizer = TfidfVectorizer(
-            max_features=self.max_features,
-            ngram_range=self.ngram_range,
-            lowercase=True,
-            token_pattern=r'\b\w+\b'
-        )
-        
-        self.doc_vectors = self.vectorizer.fit_transform(processed_docs)
-        
-        self.is_fitted = True
-        print(f"TF-IDF model fitted. Vocabulary size: {len(self.vectorizer.vocabulary_)}")
-    
-    def score(self, query: str, k: int = 10) -> List[Tuple[int, float]]:
-        """Score documents using TF-IDF cosine similarity."""
-        if not self.is_fitted:
-            raise ValueError("Model must be fitted before scoring")
-        
-        # Preprocess and vectorize query
-        processed_query = self.preprocessor.preprocess_text(query)
-        query_vector = self.vectorizer.transform([processed_query])
-        
-        # Calculate cosine similarity
-        similarities = cosine_similarity(query_vector, self.doc_vectors).flatten()
-        
-        # Get top-k documents
-        top_indices = np.argsort(similarities)[::-1][:k]
-        scores = [(int(idx), float(similarities[idx])) for idx in top_indices]
-        
-        return scores
-    
-    def get_model_info(self) -> Dict[str, Union[str, int, Tuple]]:
-        """Get TF-IDF model information."""
-        vocab_size = len(self.vectorizer.vocabulary_) if self.vectorizer else 0
-        return {
-            "model_name": self.name,
-            "max_features": self.max_features,
-            "ngram_range": self.ngram_range,
-            "vocabulary_size": vocab_size
-        }
-
-
-class QueryLikelihoodModel(SparseRetrievalModel):
-    """Query Likelihood Model with Dirichlet smoothing."""
-    
-    def __init__(self, mu: float = 2000.0):
-        super().__init__("Query Likelihood Model")
-        self.mu = mu
-        self.preprocessor = TextPreprocessor()
-        
-        # Model state
-        self.documents = []
-        self.processed_docs = []
-        self.doc_lengths = []
-        self.collection_model = Counter()
-        self.total_collection_length = 0
-    
-    def fit(self, documents: List[str]) -> None:
-        """Fit Query Likelihood model on document collection."""
-        print(f"Fitting {self.name} model on {len(documents)} documents...")
-        
-        self.documents = documents
-        
-        # Preprocess documents
-        print("Preprocessing documents...")
-        self.processed_docs = []
-        self.doc_lengths = []
-        
-        for doc in tqdm(documents, desc="Processing documents"):
-            processed_doc = self.preprocessor.preprocess_text(doc)
-            tokens = self.preprocessor.tokenize(processed_doc)
-            self.processed_docs.append(tokens)
-            self.doc_lengths.append(len(tokens))
-        
-        # Build collection model
-        print("Building collection language model...")
-        self.collection_model = Counter()
-        for tokens in tqdm(self.processed_docs, desc="Building collection model"):
-            self.collection_model.update(tokens)
-        
-        self.total_collection_length = sum(self.collection_model.values())
-        
-        self.is_fitted = True
-        print(f"QLM model fitted. Vocabulary size: {len(self.collection_model)}")
-    
-    def score(self, query: str, k: int = 10) -> List[Tuple[int, float]]:
-        """Score documents using Query Likelihood with Dirichlet smoothing."""
-        if not self.is_fitted:
-            raise ValueError("Model must be fitted before scoring")
-        
-        # Preprocess query
-        processed_query = self.preprocessor.preprocess_text(query)
-        query_tokens = self.preprocessor.tokenize(processed_query)
-        
-        if not query_tokens:
             return []
         
-        # Calculate query likelihood for all documents
-        scores = []
+        # Convert to lowercase
+        text = text.lower()
         
-        for doc_idx, (doc_tokens, doc_len) in enumerate(zip(self.processed_docs, self.doc_lengths)):
-            doc_model = Counter(doc_tokens)
-            log_likelihood = 0.0
-            
-            for term in query_tokens:
-                # Dirichlet smoothing
-                tf = doc_model.get(term, 0)
-                cf = self.collection_model.get(term, 0)
-                
-                # P(term|doc) with Dirichlet smoothing
-                p_term_doc = (tf + self.mu * (cf / self.total_collection_length)) / (doc_len + self.mu)
-                
-                # Avoid log(0)
-                if p_term_doc > 0:
-                    log_likelihood += math.log(p_term_doc)
-                else:
-                    log_likelihood += -float('inf')
-                    break
-            
-            scores.append((doc_idx, log_likelihood))
+        # Remove special characters and keep only letters, numbers, and spaces
+        text = re.sub(r'[^\w\s]', ' ', text)
         
-        # Sort by score and return top-k
-        scores.sort(key=lambda x: x[1], reverse=True)
-        return scores[:k]
+        # Split into tokens
+        tokens = text.split()
+        
+        # Remove stop words and short tokens
+        tokens = [token for token in tokens if len(token) > 1 and token not in self.stop_words]
+        
+        return tokens
+
+
+class BM25Index:
+    """BM25 index for text retrieval."""
     
-    def get_model_info(self) -> Dict[str, Union[str, float, int]]:
-        """Get QLM model information."""
-        return {
-            "model_name": self.name,
-            "mu": self.mu,
-            "vocabulary_size": len(self.collection_model),
-            "total_collection_length": self.total_collection_length
-        }
+    def __init__(self, documents: List[str], k1: float = 1.2, b: float = 0.75):
+        """
+        Initialize BM25 index.
+        
+        Args:
+            documents: List of documents to index
+            k1: BM25 parameter k1 (term frequency saturation)
+            b: BM25 parameter b (length normalization)
+        """
+        self.k1 = k1
+        self.b = b
+        self.processor = VietnameseTextProcessor()
+        
+        # Preprocess documents
+        self.documents = documents
+        self.tokenized_docs = [self.processor.preprocess_text(doc) for doc in documents]
+        
+        # Calculate statistics
+        self.num_docs = len(self.tokenized_docs)
+        self.doc_lengths = [len(doc) for doc in self.tokenized_docs]
+        self.avg_doc_length = sum(self.doc_lengths) / self.num_docs if self.num_docs > 0 else 0
+        
+        # Build vocabulary and document frequencies
+        self.vocabulary = set()
+        self.doc_freqs = {}
+        
+        for doc_tokens in self.tokenized_docs:
+            unique_tokens = set(doc_tokens)
+            self.vocabulary.update(unique_tokens)
+            for token in unique_tokens:
+                self.doc_freqs[token] = self.doc_freqs.get(token, 0) + 1
+        
+        # Pre-calculate IDF scores
+        self.idf_scores = {}
+        for term in self.vocabulary:
+            df = self.doc_freqs[term]
+            idf = math.log((self.num_docs - df + 0.5) / (df + 0.5))
+            self.idf_scores[term] = idf
+        
+        logging.info(f"BM25 index built: {self.num_docs} docs, {len(self.vocabulary)} terms")
+    
+    def _calculate_bm25_score(self, query_tokens: List[str], doc_tokens: List[str], doc_length: int) -> float:
+        """Calculate BM25 score for a query-document pair."""
+        score = 0.0
+        term_counts = Counter(doc_tokens)
+        
+        for term in query_tokens:
+            if term not in self.vocabulary:
+                continue
+            
+            tf = term_counts.get(term, 0)
+            if tf == 0:
+                continue
+            
+            idf = self.idf_scores[term]
+            
+            # BM25 formula
+            numerator = tf * (self.k1 + 1)
+            denominator = tf + self.k1 * (1 - self.b + self.b * (doc_length / self.avg_doc_length))
+            
+            score += idf * (numerator / denominator)
+        
+        return score
+    
+    def search(self, query: str, k: int = 10) -> Tuple[List[float], List[int]]:
+        """
+        Search for top-k documents using BM25.
+        
+        Args:
+            query: Search query
+            k: Number of top results to return
+            
+        Returns:
+            Tuple of (scores, document_indices)
+        """
+        query_tokens = self.processor.preprocess_text(query)
+        
+        if not query_tokens:
+            return [], []
+        
+        # Calculate scores for all documents
+        scores = []
+        for i, (doc_tokens, doc_length) in enumerate(zip(self.tokenized_docs, self.doc_lengths)):
+            score = self._calculate_bm25_score(query_tokens, doc_tokens, doc_length)
+            scores.append((score, i))
+        
+        # Sort by score (descending) and return top-k
+        scores.sort(key=lambda x: x[0], reverse=True)
+        top_k_scores = [score for score, _ in scores[:k]]
+        top_k_indices = [idx for _, idx in scores[:k]]
+        
+        return top_k_scores, top_k_indices
+    
+    def batch_search(self, queries: List[str], k: int = 10) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Search for multiple queries.
+        
+        Args:
+            queries: List of search queries
+            k: Number of top results per query
+            
+        Returns:
+            Tuple of (scores_matrix, indices_matrix)
+        """
+        all_scores = []
+        all_indices = []
+        
+        for query in tqdm(queries, desc="Processing queries"):
+            scores, indices = self.search(query, k)
+            
+            # Pad with zeros/invalid indices if needed
+            while len(scores) < k:
+                scores.append(0.0)
+                indices.append(-1)
+            
+            all_scores.append(scores)
+            all_indices.append(indices)
+        
+        return np.array(all_scores), np.array(all_indices)
 
 
 class CSVLogger:
@@ -407,7 +259,7 @@ class CSVLogger:
         with open(self.metrics_csv, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
-                'timestamp', 'model_name', 'model_params', 'num_questions', 
+                'timestamp', 'model_name', 'k1_param', 'b_param', 'num_questions', 
                 'num_documents', 'valid_samples', 'total_samples', 'MRR',
                 'Recall@1', 'Recall@3', 'Recall@5', 'Recall@10'
             ])
@@ -429,14 +281,15 @@ class CSVLogger:
                 'document_index', 'similarity_score', 'document_url', 'is_relevant'
             ])
     
-    def log_metrics(self, model_info: Dict, dataset_stats: Dict, metrics: Dict) -> None:
+    def log_metrics(self, model_name: str, k1: float, b: float,
+                   dataset_stats: Dict, metrics: Dict) -> None:
         """Log overall metrics to CSV."""
         with open(self.metrics_csv, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
                 datetime.now().isoformat(),
-                model_info.get('model_name', 'Unknown'),
-                json.dumps(model_info),
+                model_name,
+                k1, b,
                 dataset_stats.get('num_questions', 0),
                 dataset_stats.get('num_documents', 0),
                 metrics.get('Valid_Samples', 0),
@@ -516,7 +369,7 @@ class EvaluationMetrics:
     """Class for calculating retrieval metrics."""
     
     @staticmethod
-    def calculate_metrics(model: SparseRetrievalModel,
+    def calculate_metrics(index: BM25Index,
                          questions: List[str],
                          true_keys: List[str],
                          document_urls: List[str],
@@ -524,7 +377,7 @@ class EvaluationMetrics:
                          k_values: List[int] = [1, 3, 5, 10],
                          csv_logger: Optional[CSVLogger] = None) -> Tuple[Dict[str, float], List[Dict]]:
         """
-        Calculate retrieval metrics for sparse retrieval models.
+        Calculate retrieval metrics using BM25.
         
         Returns:
             Tuple of (metrics_dict, sample_results_list)
@@ -535,6 +388,9 @@ class EvaluationMetrics:
         if n == 0:
             return {}, []
         
+        # Get search results for all queries
+        scores, indices = index.batch_search(questions, max_k)
+        
         # Initialize metrics
         metrics = {f"Recall@{k}": 0 for k in k_values}
         mrr_total = 0
@@ -542,35 +398,33 @@ class EvaluationMetrics:
         sample_results = []
         
         progress_bar = tqdm(
-            zip(questions, true_keys),
+            zip(indices, scores, questions, true_keys),
             total=n,
             desc="Calculating metrics"
         )
         
-        for j, (question, true_key) in enumerate(progress_bar):
+        for j, (question_indices, question_scores, question, true_key) in enumerate(progress_bar):
             if true_key not in key2docidx:
                 continue
             
             valid_samples += 1
             true_doc_idx = key2docidx[true_key]
             
-            # Get retrieval results
-            try:
-                retrieval_results = model.score(question, k=max_k)
-            except Exception as e:
-                logging.warning(f"Error retrieving for question {j}: {str(e)}")
-                continue
-            
             # Build top 10 results
             top_10_docs = []
-            for i, (doc_idx, score) in enumerate(retrieval_results[:10]):
+            for i in range(min(10, len(question_indices))):
+                doc_idx = question_indices[i]
+                if doc_idx == -1:  # Invalid index from padding
+                    continue
+                    
+                score = float(question_scores[i])
                 doc_url = document_urls[doc_idx] if doc_idx < len(document_urls) else "unknown"
                 
                 top_10_docs.append({
                     "rank": i + 1,
                     "document_index": int(doc_idx),
                     "document_url": doc_url,
-                    "similarity_score": float(score),
+                    "similarity_score": score,
                     "is_relevant": doc_idx == true_doc_idx
                 })
             
@@ -579,15 +433,16 @@ class EvaluationMetrics:
                 csv_logger.log_search_results(j, question, top_10_docs)
             
             # Calculate recall metrics
-            retrieved_doc_indices = [doc_idx for doc_idx, _ in retrieval_results]
             for k in k_values:
-                if true_doc_idx in retrieved_doc_indices[:k]:
+                valid_indices = [idx for idx in question_indices[:k] if idx != -1]
+                if true_doc_idx in valid_indices:
                     metrics[f"Recall@{k}"] += 1
             
             # Calculate MRR
-            if true_doc_idx in retrieved_doc_indices:
-                rank = retrieved_doc_indices.index(true_doc_idx) + 1
-                mrr_total += 1.0 / rank
+            valid_indices = [idx for idx in question_indices if idx != -1]
+            ranks = [i for i, idx in enumerate(valid_indices) if idx == true_doc_idx]
+            if len(ranks) > 0:
+                mrr_total += 1.0 / (ranks[0] + 1)
             
             sample_results.append({
                 "sample_id": j,
@@ -609,24 +464,36 @@ class EvaluationMetrics:
         return metrics, sample_results
 
 
-class SparseRetrievalEvaluator:
-    """Main evaluator class for sparse retrieval models."""
+class BM25Evaluator:
+    """Main evaluator class that orchestrates the BM25 evaluation process."""
     
     def __init__(self, 
                  train_path: str,
                  articles_path: str,
-                 model: SparseRetrievalModel):
+                 k1: float = 1.2,
+                 b: float = 0.75):
+        """
+        Initialize BM25 evaluator.
+        
+        Args:
+            train_path: Path to training questions JSON
+            articles_path: Path to articles JSON
+            k1: BM25 parameter k1 (term frequency saturation)
+            b: BM25 parameter b (length normalization)
+        """
         self.dataset = VietnameseDataset(train_path, articles_path)
-        self.model = model
+        self.k1 = k1
+        self.b = b
+        self.index: Optional[BM25Index] = None
         self.csv_logger: Optional[CSVLogger] = None
     
     def run_evaluation(self, 
                       k_values: List[int] = [1, 3, 5, 10],
-                      output_file: str = "vietnamese_sparse_retrieval_evaluation_results.json",
+                      output_file: str = "vietnamese_bm25_evaluation_results.json",
                       enable_csv_logging: bool = True,
-                      csv_base_filename: str = "vietnamese_sparse_retrieval_eval") -> Dict[str, Union[Dict, List]]:
+                      csv_base_filename: str = "vietnamese_bm25_eval") -> Dict[str, Union[Dict, List]]:
         """
-        Run the complete evaluation pipeline.
+        Run the complete BM25 evaluation pipeline.
         
         Args:
             k_values: K values for recall calculation
@@ -637,23 +504,23 @@ class SparseRetrievalEvaluator:
         Returns:
             Dictionary containing metrics and sample results
         """
-        print("Starting sparse retrieval evaluation...")
+        print("Starting BM25 evaluation...")
         print(f"Dataset stats: {self.dataset.get_stats()}")
-        print(f"Model: {self.model.name}")
+        print(f"BM25 parameters: k1={self.k1}, b={self.b}")
         
         # Initialize CSV logger if enabled
         if enable_csv_logging:
             self.csv_logger = CSVLogger(csv_base_filename)
             print(f"CSV logging enabled. Files will be saved with timestamp.")
         
-        # Fit model on documents
-        print("\n1. Fitting retrieval model...")
-        self.model.fit(self.dataset.documents)
+        # Build BM25 index
+        print("\n1. Building BM25 index...")
+        self.index = BM25Index(self.dataset.documents, k1=self.k1, b=self.b)
         
         # Calculate metrics
         print("\n2. Calculating metrics...")
         metrics, sample_results = EvaluationMetrics.calculate_metrics(
-            self.model,
+            self.index,
             self.dataset.questions,
             self.dataset.true_keys,
             self.dataset.document_urls,
@@ -666,7 +533,9 @@ class SparseRetrievalEvaluator:
         if self.csv_logger:
             print("\n3. Saving CSV logs...")
             self.csv_logger.log_metrics(
-                self.model.get_model_info(),
+                "BM25", 
+                self.k1, 
+                self.b,
                 self.dataset.get_stats(), 
                 metrics
             )
@@ -675,7 +544,6 @@ class SparseRetrievalEvaluator:
         # Save JSON results
         print(f"\n{'4' if self.csv_logger else '3'}. Saving JSON results...")
         output_path = self._save_results(
-            self.model.get_model_info(),
             metrics,
             sample_results,
             output_file
@@ -683,7 +551,7 @@ class SparseRetrievalEvaluator:
         
         # Display results
         csv_paths = self.csv_logger.get_csv_paths() if self.csv_logger else {}
-        self._display_results(self.model.get_model_info(), metrics, sample_results, output_path, csv_paths)
+        self._display_results(metrics, sample_results, output_path, csv_paths)
         
         return {
             "metrics": metrics,
@@ -693,7 +561,6 @@ class SparseRetrievalEvaluator:
         }
     
     def _save_results(self, 
-                     model_info: Dict,
                      metrics: Dict[str, float],
                      sample_results: List[Dict],
                      output_file: str) -> str:
@@ -711,7 +578,9 @@ class SparseRetrievalEvaluator:
             return obj
         
         results = {
-            "model_info": model_info,
+            "model_name": "BM25",
+            "k1_parameter": self.k1,
+            "b_parameter": self.b,
             "evaluation_timestamp": datetime.now().isoformat(),
             "dataset_stats": self.dataset.get_stats(),
             "metrics": metrics,
@@ -725,22 +594,16 @@ class SparseRetrievalEvaluator:
         return str(output_path)
     
     def _display_results(self, 
-                        model_info: Dict,
                         metrics: Dict[str, float],
                         sample_results: List[Dict],
                         output_file: str,
                         csv_files: Dict[str, str] = {}) -> None:
         """Display evaluation results."""
         print("\n" + "="*60)
-        print("SPARSE RETRIEVAL EVALUATION RESULTS")
+        print("BM25 EVALUATION RESULTS")
         print("="*60)
-        print(f"Model: {model_info.get('model_name', 'Unknown')}")
-        
-        # Display model-specific parameters
-        for key, value in model_info.items():
-            if key != 'model_name':
-                print(f"{key}: {value}")
-        
+        print(f"Model: BM25")
+        print(f"Parameters: k1={self.k1}, b={self.b}")
         print(f"Valid samples: {metrics['Valid_Samples']}/{metrics['Total_Samples']}")
         
         print("\nMetrics:")
@@ -771,26 +634,3 @@ class SparseRetrievalEvaluator:
                 status = "✓" if doc['is_relevant'] else "✗"
                 print(f"    {doc['rank']}. [{status}] Score: {doc['similarity_score']:.4f}")
                 print(f"       URL: {doc['document_url']}")
-
-
-def create_model(model_type: str, **kwargs) -> SparseRetrievalModel:
-    """Factory function to create sparse retrieval models."""
-    model_type = model_type.lower()
-    
-    if model_type == "bm25":
-        k1 = kwargs.get('k1', 1.2)
-        b = kwargs.get('b', 0.75)
-        return BM25Model(k1=k1, b=b)
-    
-    elif model_type == "tfidf":
-        max_features = kwargs.get('max_features', None)
-        ngram_range = kwargs.get('ngram_range', (1, 1))
-        return TFIDFModel(max_features=max_features, ngram_range=ngram_range)
-    
-    elif model_type in ["qlm", "query_likelihood"]:
-        mu = kwargs.get('mu', 2000.0)
-        return QueryLikelihoodModel(mu=mu)
-    
-    else:
-        raise ValueError(f"Unknown model type: {model_type}. "
-                        f"Supported types: bm25, tfidf, qlm")
