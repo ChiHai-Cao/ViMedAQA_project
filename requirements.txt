@@ -1,12 +1,4 @@
 tqdm
 sentence-transformers
 transformers
-underthesea
 faiss-cpu
-pyvi
-regex
-nltk
-spacy
-pickle5
-scikit-learn
-pathlib2
