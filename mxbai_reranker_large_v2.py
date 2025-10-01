@@ -218,6 +218,8 @@ class RerankerModel:
    
     def truncate_docs(self, docs: List[str], warn_threshold: int = self.max_length) -> List[str]:
         """Truncate docs if longer than max_length and log warnings."""
+        if warn_threshold is None:
+            warn_threshold = self.max_length
         truncated = []
         for i, doc in enumerate(docs):
             if len(doc) > warn_threshold:
