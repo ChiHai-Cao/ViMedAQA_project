@@ -216,10 +216,11 @@ class RerankerModel:
         if not self._is_loaded or self.model is None:
             self.load_model()
    
-    def truncate_docs(self, docs: List[str], warn_threshold: int = self.max_length) -> List[str]:
+    def truncate_docs(self, docs: List[str], warn_threshold: Optional[int] = None) -> List[str]:
         """Truncate docs if longer than max_length and log warnings."""
         if warn_threshold is None:
             warn_threshold = self.max_length
+
         truncated = []
         for i, doc in enumerate(docs):
             if len(doc) > warn_threshold:
@@ -251,6 +252,7 @@ class RerankerModel:
         )
        
         return np.array(scores)
+
 # ============================================================================
 # RERANKER CSV LOGGER (ENHANCED)
 # ============================================================================
