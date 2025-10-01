@@ -1,11 +1,12 @@
 """
-Reranking Evaluation System (Standalone)
+Reranking Evaluation System (Standalone) - Enhanced Version
 Author: AI Assistant
-Date: 2025
+Date: 2025-10-01
 This module provides a standalone pipeline for:
 1. Cross-encoder reranking on pre-retrieved top-10 documents
 2. Comprehensive evaluation and comparison
 Assumes 'top10_retrieval.json' from retrieval phase exists.
+Enhancements: More reranker configurability, error fixes, truncation handling.
 """
 import pandas as pd
 import numpy as np
@@ -18,6 +19,16 @@ import logging
 from tqdm import tqdm
 from sentence_transformers import CrossEncoder
 import torch
+import warnings  # For truncation warnings
+
+# Optional: For JSON schema validation
+try:
+    from jsonschema import validate, ValidationError
+    HAS_JSONSCHEMA = True
+except ImportError:
+    HAS_JSONSCHEMA = False
+    warnings.warn("jsonschema not installed; skipping advanced JSON validation.")
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 # ============================================================================
@@ -80,7 +91,7 @@ class VietnameseDataset:
             "num_unique_urls": len(set(self.document_urls))
         }
 # ============================================================================
-# RETRIEVAL RESULTS LOADER
+# RETRIEVAL RESULTS LOADER (ENHANCED WITH VALIDATION)
 # ============================================================================
 class RetrievalResultsLoader:
     """Load retrieval results from top-10 JSON file."""
@@ -89,6 +100,7 @@ class RetrievalResultsLoader:
         self.top10_path = Path(top10_path)
         self._validate_path()
         self.retrieval_results = self._load_results()
+        self._validate_json_structure()  # New: Validate structure
    
     def _validate_path(self) -> None:
         """Validate that input file exists."""
@@ -104,47 +116,129 @@ class RetrievalResultsLoader:
         except Exception as e:
             raise RuntimeError(f"Error loading retrieval results: {str(e)}")
    
+    def _validate_json_structure(self) -> None:
+        """Validate JSON structure (basic schema check)."""
+        schema = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question_id": {"type": "integer"},
+                    "question": {"type": "string"},
+                    "top_10_documents": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "rank": {"type": "integer"},
+                                "document_index": {"type": "integer"},
+                                "document_url": {"type": "string"},
+                                "similarity_score": {"type": "number"}
+                            },
+                            "required": ["rank", "document_index", "document_url", "similarity_score"]
+                        }
+                    }
+                },
+                "required": ["question_id", "question", "top_10_documents"]
+            }
+        }
+        
+        if HAS_JSONSCHEMA:
+            try:
+                validate(instance=self.retrieval_results, schema=schema)
+            except ValidationError as e:
+                raise RuntimeError(f"JSON validation failed: {str(e)}")
+        else:
+            # Fallback: Basic key check
+            for i, item in enumerate(self.retrieval_results):
+                if not all(key in item for key in ["question_id", "question", "top_10_documents"]):
+                    raise KeyError(f"Missing required keys in sample {i}: {list(item.keys())}")
+                for j, doc in enumerate(item["top_10_documents"]):
+                    if not all(key in doc for key in ["rank", "document_index", "document_url", "similarity_score"]):
+                        raise KeyError(f"Missing doc keys in sample {i}, doc {j}")
+   
     def __len__(self) -> int:
         return len(self.retrieval_results)
 # ============================================================================
-# RERANKER MODEL
+# RERANKER MODEL (ENHANCED CONFIGURABILITY)
 # ============================================================================
 class RerankerModel:
-    """Cross-encoder reranker model wrapper."""
+    """Cross-encoder reranker model wrapper with enhanced configurability."""
    
-    def __init__(self, model_name: str = "mixedbread-ai/mxbai-rerank-large-v2"):
+    def __init__(self, 
+                 model_name: str = "mixedbread-ai/mxbai-rerank-large-v2",
+                 max_length: int = 512,
+                 device: Optional[str] = None,
+                 trust_remote_code: bool = False,
+                 default_batch_size: int = 32):
         self.model_name = model_name
+        self.max_length = max_length
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.trust_remote_code = trust_remote_code
+        self.default_batch_size = default_batch_size
         self.model: Optional[CrossEncoder] = None
         self._is_loaded = False
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
    
     def load_model(self) -> None:
-        """Load the CrossEncoder model."""
+        """Load the CrossEncoder model with current params."""
         try:
             self.model = CrossEncoder(
                 self.model_name,
-                max_length=512,
-                device=self.device
+                max_length=self.max_length,
+                device=self.device,
+                trust_remote_code=self.trust_remote_code
             )
             self._is_loaded = True
-            logging.info(f"Reranker model {self.model_name} loaded on {self.device}")
+            logging.info(f"Reranker model {self.model_name} loaded on {self.device} with max_length={self.max_length}")
         except Exception as e:
-            raise RuntimeError(f"Failed to load reranker model: {str(e)}")
+            if "CUDA out of memory" in str(e):
+                logging.warning("OOM detected; falling back to CPU and smaller batch.")
+                self.device = "cpu"
+                self.default_batch_size //= 2
+                self.load_model()  # Retry
+            else:
+                raise RuntimeError(f"Failed to load reranker model: {str(e)}")
+   
+    def update_params(self, max_length: Optional[int] = None, device: Optional[str] = None, batch_size: Optional[int] = None):
+        """Update model params runtime (reload if loaded)."""
+        if max_length is not None:
+            self.max_length = max_length
+        if device is not None:
+            self.device = device
+        if batch_size is not None:
+            self.default_batch_size = batch_size
+        if self._is_loaded:
+            self._is_loaded = False
+            self.load_model()  # Reload with new params
    
     def _ensure_model_loaded(self) -> None:
         """Ensure model is loaded."""
         if not self._is_loaded or self.model is None:
             self.load_model()
    
+    def truncate_docs(self, docs: List[str], warn_threshold: int = self.max_length) -> List[str]:
+        """Truncate docs if longer than max_length and log warnings."""
+        truncated = []
+        for i, doc in enumerate(docs):
+            if len(doc) > warn_threshold:
+                logging.warning(f"Doc {i} truncated from {len(doc)} to {self.max_length} chars.")
+                doc = doc[:self.max_length]
+            truncated.append(doc)
+        return truncated
+   
     def rerank(self,
                query: str,
                documents: List[str],
-               batch_size: int = 32) -> np.ndarray:
+               batch_size: Optional[int] = None) -> np.ndarray:
         """Rerank documents for a given query."""
         self._ensure_model_loaded()
+        batch_size = batch_size or self.default_batch_size
        
         if not documents:
             return np.array([])
+       
+        # Truncate if needed
+        documents = self.truncate_docs(documents)
        
         query_doc_pairs = [[query, doc] for doc in documents]
        
@@ -156,14 +250,15 @@ class RerankerModel:
        
         return np.array(scores)
 # ============================================================================
-# RERANKER CSV LOGGER
+# RERANKER CSV LOGGER (ENHANCED)
 # ============================================================================
 class RerankerCSVLogger:
     """Class for logging reranker evaluation data to CSV files."""
    
-    def __init__(self, base_filename: str):
+    def __init__(self, base_filename: str, truncate_question: int = 500):  # Configurable truncate
         self.base_filename = base_filename
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.truncate_question = truncate_question
        
         self.metrics_csv = f"{base_filename}_metrics_{self.timestamp}.csv"
         self.detailed_csv = f"{base_filename}_detailed_{self.timestamp}.csv"
@@ -186,7 +281,7 @@ class RerankerCSVLogger:
             writer = csv.writer(f)
             writer.writerow([
                 'sample_id', 'question', 'true_document_url', 'true_document_index',
-                'rank_before_rerank', 'rank_after_rerank', 'improved',
+                'rank_before_rerank', 'rank_after_rerank', 'improved', 'lost_relevant',  # New: lost_relevant
                 'rerank_score', 'retrieval_score', 'top_1_url', 'top_1_rerank_score'
             ])
        
@@ -226,7 +321,7 @@ class RerankerCSVLogger:
             ])
    
     def log_detailed_results(self, sample_results: List[Dict]) -> None:
-        """Log detailed results for each sample to CSV."""
+        """Log detailed results for each sample to CSV (no truncate or configurable)."""
         with open(self.detailed_csv, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
            
@@ -235,6 +330,7 @@ class RerankerCSVLogger:
                 rank_after = None
                 rerank_score = None
                 retrieval_score = None
+                lost_relevant = True  # Default: assume lost if not found
                
                 for doc in sample['reranked_documents']:
                     if doc['is_relevant']:
@@ -242,19 +338,23 @@ class RerankerCSVLogger:
                         rank_before = doc['rank_before_rerank']
                         rerank_score = doc['rerank_score']
                         retrieval_score = doc['retrieval_score']
+                        lost_relevant = False
                         break
                
                 top_doc = sample['reranked_documents'][0] if sample['reranked_documents'] else {}
                 improved = rank_before and rank_after and rank_after < rank_before
                
+                q_text = sample['question'][:self.truncate_question] + "..." if len(sample['question']) > self.truncate_question else sample['question']
+               
                 writer.writerow([
                     sample['sample_id'],
-                    sample['question'][:200],
+                    q_text,
                     sample.get('true_document_url', ''),
                     sample.get('true_document_index', ''),
                     rank_before if rank_before else 'Not found',
                     rank_after if rank_after else 'Not found',
                     improved,
+                    lost_relevant,  # New column
                     rerank_score if rerank_score else '',
                     retrieval_score if retrieval_score else '',
                     top_doc.get('document_url', ''),
@@ -307,9 +407,11 @@ class RerankerCSVLogger:
                     improved = rank_after < rank_before
                     rank_change = rank_before - rank_after
                    
+                    q_text = sample['question'][:self.truncate_question] + "..." if len(sample['question']) > self.truncate_question else sample['question']
+                   
                     writer.writerow([
                         sample['sample_id'],
-                        sample['question'][:100],
+                        q_text,
                         improved,
                         rank_before,
                         rank_after,
@@ -327,7 +429,7 @@ class RerankerCSVLogger:
             'comparison': self.comparison_csv
         }
 # ============================================================================
-# RERANKER METRICS
+# RERANKER METRICS (ENHANCED WITH TRUNCATION AND LOST LOGGING)
 # ============================================================================
 class RerankerMetrics:
     """Class for calculating reranking metrics."""
@@ -353,6 +455,7 @@ class RerankerMetrics:
         valid_samples = 0
         sample_results = []
         total_rerank_time = 0
+        lost_relevant_count = 0  # New: Track lost cases
        
         progress_bar = tqdm(
             enumerate(retrieval_results),
@@ -376,7 +479,7 @@ class RerankerMetrics:
             true_doc_idx = key2docidx[true_key]
            
             doc_indices = [doc['document_index'] for doc in retrieved_docs]
-            doc_texts = [documents[idx] if idx < len(documents) else "" for idx in doc_indices]
+            doc_texts = [documents[idx] if idx < len(documents) else "Unknown document" for idx in doc_indices]  # Fallback text
             retrieval_scores = [doc['similarity_score'] for doc in retrieved_docs]
            
             start_time = datetime.now()
@@ -412,6 +515,7 @@ class RerankerMetrics:
                 if true_doc_idx in reranked_doc_indices[:k]:
                     metrics[f"Recall@{k}"] += 1
            
+            true_doc_new_rank = None
             try:
                 true_doc_new_rank = next(
                     i for i, doc in enumerate(reranked_docs)
@@ -419,7 +523,8 @@ class RerankerMetrics:
                 )
                 mrr_total += 1.0 / (true_doc_new_rank + 1)
             except StopIteration:
-                pass
+                lost_relevant_count += 1
+                logging.warning(f"True doc {true_doc_idx} lost in rerank for sample {question_id}")
            
             sample_results.append({
                 "sample_id": question_id,
@@ -427,7 +532,8 @@ class RerankerMetrics:
                 "true_document_url": true_key,
                 "true_document_index": int(true_doc_idx),
                 "reranked_documents": reranked_docs,
-                "rerank_time_ms": rerank_time
+                "rerank_time_ms": rerank_time,
+                "lost_relevant": true_doc_new_rank is None  # New
             })
        
         if valid_samples > 0:
@@ -435,13 +541,14 @@ class RerankerMetrics:
                 metrics[f"Recall@{k}"] = metrics[f"Recall@{k}"] / valid_samples
             metrics["MRR"] = mrr_total / valid_samples
             metrics["avg_rerank_time_ms"] = total_rerank_time / valid_samples
+            metrics["lost_relevant_count"] = lost_relevant_count  # New metric
        
         metrics["Valid_Samples"] = valid_samples
         metrics["Total_Samples"] = n
        
         return metrics, sample_results
 # ============================================================================
-# RERANKER EVALUATOR (MAIN CLASS)
+# RERANKER EVALUATOR (MAIN CLASS - ENHANCED)
 # ============================================================================
 class RerankerEvaluator:
     """Main evaluator class for reranking evaluation."""
@@ -451,12 +558,25 @@ class RerankerEvaluator:
                  articles_path: str,
                  top10_path: str,
                  reranker_model: str = "mixedbread-ai/mxbai-rerank-large-v2",
-                 retriever_model_name: str = "Unknown"):
+                 retriever_model_name: str = "Unknown",
+                 reranker_params: Optional[Dict] = None):  # New: Pass params
         self.dataset = VietnameseDataset(train_path, articles_path)
         self.retrieval_loader = RetrievalResultsLoader(top10_path)
-        self.reranker = RerankerModel(reranker_model)
+        # Enhanced reranker init with params
+        params = reranker_params or {}
+        self.reranker = RerankerModel(
+            model_name=reranker_model,
+            max_length=params.get('max_length', 512),
+            device=params.get('device'),
+            trust_remote_code=params.get('trust_remote_code', False),
+            default_batch_size=params.get('default_batch_size', 32)
+        )
         self.retriever_model_name = retriever_model_name
         self.csv_logger: Optional[RerankerCSVLogger] = None
+   
+    def update_reranker_params(self, **kwargs):
+        """Update reranker params runtime."""
+        self.reranker.update_params(**kwargs)
    
     def run_evaluation(self,
                       batch_size: int = 32,
@@ -464,14 +584,15 @@ class RerankerEvaluator:
                       output_file: str = "reranker_results.json",
                       reranked_top10_file: str = "reranked_top10.json",
                       enable_csv_logging: bool = True,
-                      csv_base_filename: str = "reranker_eval") -> Dict[str, Union[Dict, List]]:
+                      csv_base_filename: str = "reranker_eval",
+                      truncate_question: int = 500) -> Dict[str, Union[Dict, List]]:  # New param
         """Run the complete reranking evaluation pipeline."""
         print("Starting reranker evaluation...")
         print(f"Dataset stats: {self.dataset.get_stats()}")
         print(f"Questions to rerank: {len(self.retrieval_loader)}")
        
         if enable_csv_logging:
-            self.csv_logger = RerankerCSVLogger(csv_base_filename)
+            self.csv_logger = RerankerCSVLogger(csv_base_filename, truncate_question=truncate_question)
        
         print("\n1. Loading reranker model...")
         self.reranker.load_model()
@@ -530,8 +651,9 @@ class RerankerEvaluator:
             "csv_files": csv_paths
         }
    
+    # _save_reranked_top10, _save_results, _display_results remain the same as original
+    # (Omit for brevity; copy from original code)
     def _save_reranked_top10(self, sample_results: List[Dict], output_file: str) -> str:
-        """Save reranked top-10 documents to JSON file."""
         def convert_numpy_types(obj):
             if isinstance(obj, (np.bool_, np.bool8)):
                 return bool(obj)
@@ -563,7 +685,6 @@ class RerankerEvaluator:
                      metrics: Dict[str, float],
                      sample_results: List[Dict],
                      output_file: str) -> str:
-        """Save evaluation results to JSON file."""
         def convert_numpy_types(obj):
             if isinstance(obj, (np.bool_, np.bool8)):
                 return bool(obj)
@@ -597,13 +718,14 @@ class RerankerEvaluator:
                         output_file: str,
                         reranked_file: str,
                         csv_files: Dict[str, str] = {}) -> None:
-        """Display evaluation results."""
         print("\n" + "="*60)
         print("RERANKER EVALUATION RESULTS")
         print("="*60)
         print(f"Reranker Model: {reranker_model}")
         print(f"Valid samples: {metrics['Valid_Samples']}/{metrics['Total_Samples']}")
         print(f"Avg rerank time: {metrics.get('avg_rerank_time_ms', 0):.2f} ms/question")
+        if 'lost_relevant_count' in metrics:
+            print(f"Lost relevant docs: {metrics['lost_relevant_count']}")
        
         print("\nMetrics (After Reranking):")
         print(f" MRR: {metrics['MRR']:.4f}")
