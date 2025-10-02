@@ -111,13 +111,15 @@ class VietnameseDataset:
 # RETRIEVAL RESULTS LOADER
 # ============================================================================
 class RetrievalResultsLoader:
-    """Load retrieval results from top-10 JSON file."""
+    """Load retrieval results from top-10 JSON file with flexible key mapping."""
    
-    def __init__(self, top10_path: str):
+    def __init__(self, top10_path: str, auto_detect_keys: bool = True):
         self.top10_path = Path(top10_path)
+        self.auto_detect_keys = auto_detect_keys
         self._validate_path()
         self.retrieval_results = self._load_results()
-        self._validate_json_structure()
+        self.key_mapping = self._detect_key_mapping()
+        self._normalize_structure()
    
     def _validate_path(self) -> None:
         """Validate that input file exists."""
@@ -129,28 +131,130 @@ class RetrievalResultsLoader:
         try:
             with open(self.top10_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+            
+            # Handle different JSON structures
+            if isinstance(data, dict):
+                # If it's a dict, try to find the list
+                for key in ['results', 'data', 'retrieval_results', 'questions']:
+                    if key in data and isinstance(data[key], list):
+                        data = data[key]
+                        break
+                else:
+                    # If still dict, wrap in list
+                    data = [data]
+            
             logger.info(f"Loaded {len(data)} retrieval results")
             return data
         except Exception as e:
             logger.error(f"Error loading retrieval results: {str(e)}")
             raise RuntimeError(f"Error loading retrieval results: {str(e)}")
    
-    def _validate_json_structure(self) -> None:
-        """Validate JSON structure (basic key check)."""
-        required_keys = ["question_id", "question", "top_10_documents"]
-        doc_keys = ["rank", "document_index", "document_url", "similarity_score"]
+    def _detect_key_mapping(self) -> Dict[str, str]:
+        """Auto-detect key names in the JSON structure."""
+        if not self.retrieval_results:
+            return {}
+        
+        sample = self.retrieval_results[0]
+        mapping = {}
+        
+        # Detect question_id key
+        for key in ['question_id', 'id', 'qid', 'query_id', 'index']:
+            if key in sample:
+                mapping['question_id'] = key
+                break
+        else:
+            # If no ID found, we'll use index
+            mapping['question_id'] = None
+        
+        # Detect question key
+        for key in ['question', 'query', 'text', 'question_text']:
+            if key in sample:
+                mapping['question'] = key
+                break
+        
+        # Detect documents key
+        for key in ['top_10_documents', 'documents', 'retrieved_documents', 'results', 'top_documents', 'docs']:
+            if key in sample:
+                mapping['documents'] = key
+                break
+        
+        # Check document structure
+        if mapping.get('documents') and sample.get(mapping['documents']):
+            doc_sample = sample[mapping['documents']][0] if isinstance(sample[mapping['documents']], list) else sample[mapping['documents']]
+            
+            # Detect document keys
+            doc_mapping = {}
+            
+            for key in ['rank', 'ranking', 'position', 'index']:
+                if key in doc_sample:
+                    doc_mapping['rank'] = key
+                    break
+            
+            for key in ['document_index', 'doc_index', 'doc_id', 'document_id', 'index', 'id']:
+                if key in doc_sample:
+                    doc_mapping['document_index'] = key
+                    break
+            
+            for key in ['document_url', 'url', 'doc_url', 'article_url', 'source']:
+                if key in doc_sample:
+                    doc_mapping['document_url'] = key
+                    break
+            
+            for key in ['similarity_score', 'score', 'similarity', 'relevance_score', 'relevance']:
+                if key in doc_sample:
+                    doc_mapping['similarity_score'] = key
+                    break
+            
+            mapping['doc_keys'] = doc_mapping
+        
+        logger.info(f"Detected key mapping: {mapping}")
+        return mapping
+   
+    def _normalize_structure(self) -> None:
+        """Normalize the JSON structure to standard format."""
+        normalized_results = []
         
         for i, item in enumerate(self.retrieval_results):
-            # Check main keys
-            missing = [k for k in required_keys if k not in item]
-            if missing:
-                raise KeyError(f"Missing keys in sample {i}: {missing}")
+            normalized_item = {}
             
-            # Check document keys
-            for j, doc in enumerate(item.get("top_10_documents", [])):
-                missing_doc = [k for k in doc_keys if k not in doc]
-                if missing_doc:
-                    raise KeyError(f"Missing doc keys in sample {i}, doc {j}: {missing_doc}")
+            # Get question_id
+            if self.key_mapping.get('question_id'):
+                normalized_item['question_id'] = item.get(self.key_mapping['question_id'], i)
+            else:
+                normalized_item['question_id'] = i
+            
+            # Get question
+            if self.key_mapping.get('question'):
+                normalized_item['question'] = str(item.get(self.key_mapping['question'], ''))
+            else:
+                raise KeyError(f"Could not find question field in sample {i}. Available keys: {list(item.keys())}")
+            
+            # Get documents
+            if self.key_mapping.get('documents'):
+                docs = item.get(self.key_mapping['documents'], [])
+                if not isinstance(docs, list):
+                    docs = [docs]
+                
+                normalized_docs = []
+                doc_mapping = self.key_mapping.get('doc_keys', {})
+                
+                for j, doc in enumerate(docs):
+                    normalized_doc = {
+                        'rank': doc.get(doc_mapping.get('rank', 'rank'), j + 1),
+                        'document_index': doc.get(doc_mapping.get('document_index', 'document_index'), j),
+                        'document_url': doc.get(doc_mapping.get('document_url', 'document_url'), ''),
+                        'similarity_score': float(doc.get(doc_mapping.get('similarity_score', 'similarity_score'), 0.0))
+                    }
+                    normalized_docs.append(normalized_doc)
+                
+                normalized_item['top_10_documents'] = normalized_docs
+            else:
+                raise KeyError(f"Could not find documents field in sample {i}. Available keys: {list(item.keys())}")
+            
+            normalized_results.append(normalized_item)
+        
+        self.retrieval_results = normalized_results
+        logger.info("Successfully normalized JSON structure")
    
     def __len__(self) -> int:
         return len(self.retrieval_results)
@@ -793,3 +897,56 @@ class RerankerEvaluator:
             for name, path in csv_files.items():
                 print(f"  {name}: {path}")
         print("="*60 + "\n")
+
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+def inspect_json_structure(json_path: str, max_samples: int = 3) -> None:
+    """Utility function to inspect JSON structure for debugging."""
+    print(f"\n{'='*60}")
+    print(f"INSPECTING: {json_path}")
+    print(f"{'='*60}\n")
+    
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        print(f"Root type: {type(data)}")
+        
+        if isinstance(data, dict):
+            print(f"Root keys: {list(data.keys())}")
+            print("\nRoot structure:")
+            for key, value in list(data.items())[:5]:
+                print(f"  {key}: {type(value)}")
+                if isinstance(value, list) and len(value) > 0:
+                    print(f"    -> List length: {len(value)}")
+                    print(f"    -> First item type: {type(value[0])}")
+                    if isinstance(value[0], dict):
+                        print(f"    -> First item keys: {list(value[0].keys())}")
+        
+        elif isinstance(data, list):
+            print(f"Root is list with {len(data)} items")
+            if len(data) > 0:
+                print(f"\nFirst item type: {type(data[0])}")
+                if isinstance(data[0], dict):
+                    print(f"First item keys: {list(data[0].keys())}")
+                    print("\nFirst few samples:")
+                    for i, item in enumerate(data[:max_samples]):
+                        print(f"\n--- Sample {i} ---")
+                        for key, value in item.items():
+                            if isinstance(value, (list, dict)):
+                                print(f"  {key}: {type(value)}")
+                                if isinstance(value, list) and len(value) > 0:
+                                    print(f"    -> Length: {len(value)}")
+                                    print(f"    -> First item: {type(value[0])}")
+                                    if isinstance(value[0], dict):
+                                        print(f"    -> Keys: {list(value[0].keys())}")
+                            else:
+                                val_str = str(value)[:50]
+                                print(f"  {key}: {val_str}{'...' if len(str(value)) > 50 else ''}")
+        
+        print(f"\n{'='*60}\n")
+        
+    except Exception as e:
+        print(f"Error inspecting JSON: {str(e)}")
